@@ -6,6 +6,7 @@ from datetime import datetime
 import subprocess
 import json
 import tempfile
+import torch
 
 
 class SaveImageNoMetadata:
@@ -432,15 +433,172 @@ class SaveVideoNoMetadata:
         return (result,)
 
 
+class MLFrameRateResampler:
+    """
+    Resample image sequences from 25fps to 16fps using ffmpeg
+
+    This node takes an image sequence (typically 25 frames) and resamples it to 16 frames
+    while maintaining the original resolution. It uses ffmpeg for high-quality temporal resampling.
+    """
+
+    def __init__(self):
+        self.type = "processing"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Input image sequence (typically 25 frames at 25fps)"}),
+                "input_fps": ("INT", {
+                    "default": 25,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "Input frame rate (fps)"
+                }),
+                "output_fps": ("INT", {
+                    "default": 16,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "Output frame rate (fps)"
+                }),
+                "interpolation_method": (["blend", "minterpolate", "framestep"], {
+                    "default": "blend",
+                    "tooltip": "Interpolation method for frame resampling"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("resampled_images",)
+    FUNCTION = "resample_frames"
+    CATEGORY = "image/processing"
+    DESCRIPTION = "Resample image sequence from one frame rate to another (e.g., 25fps to 16fps)"
+
+    def resample_frames(self, images, input_fps=25, output_fps=16, interpolation_method="blend"):
+        """
+        Resample image sequence to different frame rate
+
+        Args:
+            images: Input images tensor [N, H, W, C]
+            input_fps: Input frame rate
+            output_fps: Output frame rate
+            interpolation_method: Method for frame interpolation
+
+        Returns:
+            Tuple containing resampled images tensor
+        """
+        # Check if ffmpeg is available
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Error: FFmpeg not found. Please install ffmpeg.")
+            return (images,)  # Return original images if ffmpeg not available
+
+        # Get image dimensions
+        num_frames = len(images)
+        if num_frames == 0:
+            return (images,)
+
+        # Calculate expected output frame count
+        expected_output_frames = int(num_frames * output_fps / input_fps)
+
+        # Convert images to numpy arrays
+        frames = []
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img_array = np.clip(i, 0, 255).astype(np.uint8)
+            frames.append(img_array)
+
+        # Create temporary directories for input and output
+        with tempfile.TemporaryDirectory() as input_dir, \
+             tempfile.TemporaryDirectory() as output_dir:
+
+            # Save input frames as temporary images
+            for idx, frame in enumerate(frames):
+                frame_path = os.path.join(input_dir, f"frame_{idx:06d}.png")
+                Image.fromarray(frame).save(frame_path)
+
+            # Build ffmpeg command based on interpolation method
+            input_pattern = os.path.join(input_dir, "frame_%06d.png")
+            output_pattern = os.path.join(output_dir, "frame_%06d.png")
+
+            if interpolation_method == "minterpolate":
+                # Use minterpolate filter for motion-compensated interpolation
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", f"minterpolate='fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'",
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+            elif interpolation_method == "framestep":
+                # Simple frame selection (no blending)
+                fps_filter = f"fps={output_fps}"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", fps_filter,
+                    "-vsync", "0",
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+            else:  # blend (default)
+                # Use fps filter with blend for smooth resampling
+                fps_filter = f"fps={output_fps}"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", fps_filter,
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+
+            # Execute ffmpeg
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                print(f"Resampled {num_frames} frames at {input_fps}fps to {output_fps}fps using {interpolation_method} method")
+            except subprocess.CalledProcessError as e:
+                error_msg = f"FFmpeg error during resampling: {e.stderr}"
+                print(error_msg)
+                return (images,)  # Return original images on error
+
+            # Load resampled frames
+            output_frames = []
+            output_files = sorted([f for f in os.listdir(output_dir) if f.endswith('.png')])
+
+            for frame_file in output_files:
+                frame_path = os.path.join(output_dir, frame_file)
+                img = Image.open(frame_path)
+                img_array = np.array(img).astype(np.float32) / 255.0
+                output_frames.append(img_array)
+
+            if len(output_frames) == 0:
+                print("Error: No output frames generated")
+                return (images,)
+
+            # Convert back to torch tensor
+            output_tensor = torch.from_numpy(np.stack(output_frames))
+
+            print(f"Successfully resampled from {num_frames} frames to {len(output_frames)} frames")
+            return (output_tensor,)
+
+
 # Export nodes
 NODE_CLASS_MAPPINGS = {
     "SaveImageNoMetadata": SaveImageNoMetadata,
     "SaveImageCleanMetadata": SaveImageCleanMetadata,
     "SaveVideoNoMetadata": SaveVideoNoMetadata,
+    "MLFrameRateResampler": MLFrameRateResampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageNoMetadata": "ML Save Image (No Metadata)",
     "SaveImageCleanMetadata": "ML Save Image (Clean Metadata)",
     "SaveVideoNoMetadata": "ML Save Video (No Metadata)",
+    "MLFrameRateResampler": "ML Frame Rate Resampler",
 }
