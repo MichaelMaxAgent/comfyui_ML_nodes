@@ -588,12 +588,261 @@ class MLFrameRateResampler:
             return (output_tensor,)
 
 
+class MLFrameRateResampler_GPU:
+    """
+    GPU-accelerated frame rate resampling using CUDA/NVENC
+
+    This node uses GPU acceleration for faster frame rate conversion.
+    Requires NVIDIA GPU with CUDA support and ffmpeg compiled with NVENC.
+    Falls back to CPU processing if GPU is unavailable.
+    """
+
+    def __init__(self):
+        self.type = "processing"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Input image sequence (typically 25 frames at 25fps)"}),
+                "input_fps": ("INT", {
+                    "default": 25,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "Input frame rate (fps)"
+                }),
+                "output_fps": ("INT", {
+                    "default": 16,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "Output frame rate (fps)"
+                }),
+                "interpolation_method": (["blend", "minterpolate", "framestep"], {
+                    "default": "blend",
+                    "tooltip": "Interpolation method for frame resampling"
+                }),
+                "gpu_device": (["auto", "cuda:0", "cuda:1", "cpu"], {
+                    "default": "auto",
+                    "tooltip": "GPU device selection (auto will try CUDA first, then fall back to CPU)"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("resampled_images",)
+    FUNCTION = "resample_frames_gpu"
+    CATEGORY = "image/processing"
+    DESCRIPTION = "GPU-accelerated frame rate resampling (25fps to 16fps) using CUDA/NVENC"
+
+    def resample_frames_gpu(self, images, input_fps=25, output_fps=16,
+                           interpolation_method="blend", gpu_device="auto"):
+        """
+        GPU-accelerated frame rate resampling
+
+        Args:
+            images: Input images tensor [N, H, W, C]
+            input_fps: Input frame rate
+            output_fps: Output frame rate
+            interpolation_method: Method for frame interpolation
+            gpu_device: GPU device to use
+
+        Returns:
+            Tuple containing resampled images tensor
+        """
+        # Check if ffmpeg is available
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Error: FFmpeg not found. Please install ffmpeg.")
+            return (images,)
+
+        # Determine hardware acceleration method
+        use_gpu = False
+        hwaccel_method = None
+
+        if gpu_device != "cpu":
+            # Check for CUDA support
+            try:
+                result = subprocess.run(["ffmpeg", "-hwaccels"],
+                                      capture_output=True, text=True, check=True)
+                available_hwaccels = result.stdout.lower()
+
+                if "cuda" in available_hwaccels and gpu_device in ["auto", "cuda:0", "cuda:1"]:
+                    use_gpu = True
+                    hwaccel_method = "cuda"
+                    print(f"Using CUDA GPU acceleration on device: {gpu_device}")
+                else:
+                    print("CUDA not available, falling back to CPU")
+            except subprocess.CalledProcessError:
+                print("Could not detect hardware acceleration, using CPU")
+
+        # Get image dimensions
+        num_frames = len(images)
+        if num_frames == 0:
+            return (images,)
+
+        # Convert images to numpy arrays
+        frames = []
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img_array = np.clip(i, 0, 255).astype(np.uint8)
+            frames.append(img_array)
+
+        # Create temporary directories for input and output
+        with tempfile.TemporaryDirectory() as input_dir, \
+             tempfile.TemporaryDirectory() as output_dir:
+
+            # Save input frames as temporary images
+            for idx, frame in enumerate(frames):
+                frame_path = os.path.join(input_dir, f"frame_{idx:06d}.png")
+                Image.fromarray(frame).save(frame_path)
+
+            # Build ffmpeg command
+            input_pattern = os.path.join(input_dir, "frame_%06d.png")
+            output_pattern = os.path.join(output_dir, "frame_%06d.png")
+
+            # Base command
+            cmd = ["ffmpeg", "-y"]
+
+            # Add GPU acceleration if available
+            if use_gpu and hwaccel_method == "cuda":
+                # Extract GPU index for CUDA
+                gpu_id = "0"
+                if ":" in gpu_device:
+                    gpu_id = gpu_device.split(":")[1]
+
+                # CUDA hardware acceleration
+                cmd.extend([
+                    "-hwaccel", "cuda",
+                    "-hwaccel_device", gpu_id,
+                    "-hwaccel_output_format", "cuda"
+                ])
+
+            # Input settings
+            cmd.extend([
+                "-framerate", str(input_fps),
+                "-i", input_pattern
+            ])
+
+            # Build filter chain based on interpolation method and GPU usage
+            if use_gpu and hwaccel_method == "cuda":
+                # GPU-accelerated filters
+                if interpolation_method == "minterpolate":
+                    # For minterpolate, we need to download from GPU, process, then upload
+                    filter_chain = f"hwdownload,format=nv12,minterpolate='fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'"
+                elif interpolation_method == "framestep":
+                    filter_chain = f"hwdownload,format=nv12,fps={output_fps}"
+                else:  # blend
+                    # Use scale_cuda for GPU processing
+                    filter_chain = f"hwdownload,format=nv12,fps={output_fps}"
+
+                cmd.extend(["-vf", filter_chain])
+            else:
+                # CPU filters (same as original)
+                if interpolation_method == "minterpolate":
+                    cmd.extend([
+                        "-vf", f"minterpolate='fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'"
+                    ])
+                elif interpolation_method == "framestep":
+                    cmd.extend(["-vf", f"fps={output_fps}", "-vsync", "0"])
+                else:  # blend
+                    cmd.extend(["-vf", f"fps={output_fps}"])
+
+            # Output settings
+            cmd.extend([
+                "-pix_fmt", "rgb24",
+                output_pattern
+            ])
+
+            # Execute ffmpeg
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                device_info = f"GPU ({hwaccel_method})" if use_gpu else "CPU"
+                print(f"Resampled {num_frames} frames at {input_fps}fps to {output_fps}fps "
+                      f"using {interpolation_method} method on {device_info}")
+            except subprocess.CalledProcessError as e:
+                error_msg = f"FFmpeg error during GPU resampling: {e.stderr}"
+                print(error_msg)
+                print("Falling back to CPU processing...")
+
+                # Retry with CPU if GPU failed
+                if use_gpu:
+                    return self._fallback_cpu_resample(images, input_fps, output_fps,
+                                                       interpolation_method, input_dir, output_dir)
+                return (images,)
+
+            # Load resampled frames
+            output_frames = []
+            output_files = sorted([f for f in os.listdir(output_dir) if f.endswith('.png')])
+
+            for frame_file in output_files:
+                frame_path = os.path.join(output_dir, frame_file)
+                img = Image.open(frame_path)
+                img_array = np.array(img).astype(np.float32) / 255.0
+                output_frames.append(img_array)
+
+            if len(output_frames) == 0:
+                print("Error: No output frames generated")
+                return (images,)
+
+            # Convert back to torch tensor
+            output_tensor = torch.from_numpy(np.stack(output_frames))
+
+            print(f"Successfully resampled from {num_frames} frames to {len(output_frames)} frames")
+            return (output_tensor,)
+
+    def _fallback_cpu_resample(self, images, input_fps, output_fps,
+                               interpolation_method, input_dir, output_dir):
+        """Fallback to CPU processing if GPU fails"""
+        input_pattern = os.path.join(input_dir, "frame_%06d.png")
+        output_pattern = os.path.join(output_dir, "frame_%06d.png")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(input_fps),
+            "-i", input_pattern
+        ]
+
+        if interpolation_method == "minterpolate":
+            cmd.extend(["-vf", f"minterpolate='fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'"])
+        elif interpolation_method == "framestep":
+            cmd.extend(["-vf", f"fps={output_fps}", "-vsync", "0"])
+        else:
+            cmd.extend(["-vf", f"fps={output_fps}"])
+
+        cmd.extend(["-pix_fmt", "rgb24", output_pattern])
+
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print("CPU fallback successful")
+        except subprocess.CalledProcessError as e:
+            print(f"CPU fallback also failed: {e.stderr}")
+            return (images,)
+
+        # Load frames (same as GPU path)
+        output_frames = []
+        output_files = sorted([f for f in os.listdir(output_dir) if f.endswith('.png')])
+
+        for frame_file in output_files:
+            frame_path = os.path.join(output_dir, frame_file)
+            img = Image.open(frame_path)
+            img_array = np.array(img).astype(np.float32) / 255.0
+            output_frames.append(img_array)
+
+        if len(output_frames) > 0:
+            return (torch.from_numpy(np.stack(output_frames)),)
+        return (images,)
+
+
 # Export nodes
 NODE_CLASS_MAPPINGS = {
     "SaveImageNoMetadata": SaveImageNoMetadata,
     "SaveImageCleanMetadata": SaveImageCleanMetadata,
     "SaveVideoNoMetadata": SaveVideoNoMetadata,
     "MLFrameRateResampler": MLFrameRateResampler,
+    "MLFrameRateResampler_GPU": MLFrameRateResampler_GPU,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -601,4 +850,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveImageCleanMetadata": "ML Save Image (Clean Metadata)",
     "SaveVideoNoMetadata": "ML Save Video (No Metadata)",
     "MLFrameRateResampler": "ML Frame Rate Resampler",
+    "MLFrameRateResampler_GPU": "ML Frame Rate Resampler (GPU)",
 }
