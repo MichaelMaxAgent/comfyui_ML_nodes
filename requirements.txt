@@ -1,0 +1,17 @@
+# ComfyUI Image Saver & Frame Rate Processor Requirements
+#
+# Note: PyTorch and NumPy are already included with ComfyUI installation
+# These are minimal additional requirements
+
+# Image processing
+Pillow>=9.0.0
+
+# Note: ffmpeg is required for video processing and frame rate resampling
+# but it's a system-level dependency, not a Python package.
+# Install ffmpeg using your system package manager:
+#
+# Ubuntu/Debian:  sudo apt install ffmpeg
+# macOS:          brew install ffmpeg
+# Windows:        Download from https://ffmpeg.org/download.html
+#
+# Verify installation with: ffmpeg -version
