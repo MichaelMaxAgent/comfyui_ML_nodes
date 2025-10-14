@@ -836,6 +836,157 @@ class MLFrameRateResampler_GPU:
         return (images,)
 
 
+class MLVideoRateConverter:
+    """
+    Resample image sequences with custom input FPS
+
+    This node is similar to MLFrameRateResampler but allows you to specify the original
+    frame rate as an input parameter. Useful when the source frame rate is variable or
+    comes from other nodes.
+    """
+
+    def __init__(self):
+        self.type = "processing"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Input image sequence"}),
+                "input_fps": ("INT,FLOAT", {
+                    "default": 25,
+                    "forceInput": True,
+                    "tooltip": "Original frame rate (connect from other node)"
+                }),
+                "output_fps": ("INT", {
+                    "default": 16,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "Target output frame rate"
+                }),
+                "interpolation_method": (["blend", "minterpolate", "framestep"], {
+                    "default": "blend",
+                    "tooltip": "Interpolation method for frame resampling"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("resampled_images",)
+    FUNCTION = "resample_with_input_fps"
+    CATEGORY = "image/processing"
+    DESCRIPTION = "Resample image sequence with custom input FPS (e.g., 25fps input → 16fps output)"
+
+    def resample_with_input_fps(self, images, input_fps=25.0, output_fps=16, interpolation_method="blend"):
+        """
+        Resample image sequence with specified input FPS
+
+        Args:
+            images: Input images tensor [N, H, W, C]
+            input_fps: Input frame rate (can be float)
+            output_fps: Output frame rate
+            interpolation_method: Method for frame interpolation
+
+        Returns:
+            Tuple containing resampled images tensor
+        """
+        # Check if ffmpeg is available
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("Error: FFmpeg not found. Please install ffmpeg.")
+            return (images,)
+
+        # Get image dimensions
+        num_frames = len(images)
+        if num_frames == 0:
+            return (images,)
+
+        # Convert images to numpy arrays
+        frames = []
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img_array = np.clip(i, 0, 255).astype(np.uint8)
+            frames.append(img_array)
+
+        # Create temporary directories for input and output
+        with tempfile.TemporaryDirectory() as input_dir, \
+             tempfile.TemporaryDirectory() as output_dir:
+
+            # Save input frames as temporary images
+            for idx, frame in enumerate(frames):
+                frame_path = os.path.join(input_dir, f"frame_{idx:06d}.png")
+                Image.fromarray(frame).save(frame_path)
+
+            # Build ffmpeg command based on interpolation method
+            input_pattern = os.path.join(input_dir, "frame_%06d.png")
+            output_pattern = os.path.join(output_dir, "frame_%06d.png")
+
+            if interpolation_method == "minterpolate":
+                # Use minterpolate filter for motion-compensated interpolation
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", f"minterpolate='fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'",
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+            elif interpolation_method == "framestep":
+                # Simple frame selection (no blending)
+                fps_filter = f"fps={output_fps}"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", fps_filter,
+                    "-vsync", "0",
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+            else:  # blend (default)
+                # Use fps filter with blend for smooth resampling
+                fps_filter = f"fps={output_fps}"
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(input_fps),
+                    "-i", input_pattern,
+                    "-vf", fps_filter,
+                    "-pix_fmt", "rgb24",
+                    output_pattern
+                ]
+
+            # Execute ffmpeg
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                print(f"Resampled {num_frames} frames at {input_fps}fps to {output_fps}fps using {interpolation_method} method")
+            except subprocess.CalledProcessError as e:
+                error_msg = f"FFmpeg error during resampling: {e.stderr}"
+                print(error_msg)
+                return (images,)
+
+            # Load resampled frames
+            output_frames = []
+            output_files = sorted([f for f in os.listdir(output_dir) if f.endswith('.png')])
+
+            for frame_file in output_files:
+                frame_path = os.path.join(output_dir, frame_file)
+                img = Image.open(frame_path)
+                img_array = np.array(img).astype(np.float32) / 255.0
+                output_frames.append(img_array)
+
+            if len(output_frames) == 0:
+                print("Error: No output frames generated")
+                return (images,)
+
+            # Convert back to torch tensor
+            output_tensor = torch.from_numpy(np.stack(output_frames))
+
+            print(f"Successfully resampled from {num_frames} frames to {len(output_frames)} frames")
+            return (output_tensor,)
+
+
 # Export nodes
 NODE_CLASS_MAPPINGS = {
     "SaveImageNoMetadata": SaveImageNoMetadata,
@@ -843,6 +994,7 @@ NODE_CLASS_MAPPINGS = {
     "SaveVideoNoMetadata": SaveVideoNoMetadata,
     "MLFrameRateResampler": MLFrameRateResampler,
     "MLFrameRateResampler_GPU": MLFrameRateResampler_GPU,
+    "MLVideoRateConverter": MLVideoRateConverter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -851,4 +1003,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveVideoNoMetadata": "ML Save Video (No Metadata)",
     "MLFrameRateResampler": "ML Frame Rate Resampler",
     "MLFrameRateResampler_GPU": "ML Frame Rate Resampler (GPU)",
+    "MLVideoRateConverter": "ML Video Rate Converter 🎬",
 }
