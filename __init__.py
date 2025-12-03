@@ -5,6 +5,7 @@ A collection of ComfyUI custom nodes for:
 - Saving images/videos without workflow metadata
 - GPU-accelerated frame rate resampling (e.g., 25fps to 16fps)
 - Multiple interpolation algorithms (blend, minterpolate, framestep)
+- OpenPose skeleton processing (remove head/face region)
 
 Nodes included:
 - ML Save Image (No Metadata)
@@ -12,6 +13,7 @@ Nodes included:
 - ML Save Video (No Metadata)
 - ML Frame Rate Resampler
 - ML Frame Rate Resampler (GPU)
+- ML Remove Pose Head
 """
 
 __all__ = [
@@ -20,7 +22,7 @@ __all__ = [
 ]
 
 __author__ = "ML Custom Nodes"
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __license__ = "MIT"
 
 from .src.comfyui_ML_nodes.nodes import NODE_CLASS_MAPPINGS

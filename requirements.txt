@@ -6,6 +6,9 @@
 # Image processing
 Pillow>=9.0.0
 
+# OpenPose skeleton processing
+opencv-python>=4.0.0
+
 # Note: ffmpeg is required for video processing and frame rate resampling
 # but it's a system-level dependency, not a Python package.
 # Install ffmpeg using your system package manager:

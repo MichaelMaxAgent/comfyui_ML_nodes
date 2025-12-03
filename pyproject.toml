@@ -3,9 +3,9 @@ requires = ["setuptools>=70.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "comfyui_image_saver"
-version = "0.1.0"
-description = "ComfyUI custom node for saving images without metadata"
+name = "comfyui_ML_nodes"
+version = "0.3.0"
+description = "ComfyUI custom nodes for image/video processing, frame rate conversion, and OpenPose skeleton processing"
 authors = [
   {name = "Your Name", email = "your.email@example.com"}
 ]
@@ -15,6 +15,7 @@ requires-python = ">=3.10"
 classifiers = []
 dependencies = [
     "Pillow>=10.0.0",
+    "opencv-python>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -25,10 +26,10 @@ dev = [
 
 [tool.comfy]
 PublisherId = "your_username"
-DisplayName = "Image Saver (No Metadata)"
+DisplayName = "ML Nodes (Image/Video/OpenPose Processing)"
 Icon = ""
-Tags = ["image", "save", "metadata"]
-Repository = "https://github.com/your_username/comfyui_image_saver"
+Tags = ["image", "video", "save", "metadata", "framerate", "gpu", "openpose", "skeleton"]
+Repository = "https://github.com/your_username/comfyui_ML_nodes"
 includes = []
 
 [tool.setuptools.package-data]

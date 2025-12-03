@@ -1,6 +1,6 @@
 # ComfyUI Image Saver & Frame Rate Processor
 
-ComfyUI custom nodes for saving images/videos without metadata and processing frame rates with GPU acceleration.
+ComfyUI custom nodes for saving images/videos without metadata, processing frame rates with GPU acceleration, and OpenPose skeleton processing.
 
 [中文文档](#中文文档) | [English](#english-documentation)
 
@@ -12,6 +12,7 @@ ComfyUI 自定义节点集合，提供以下功能：
 - 保存不含工作流元数据的图片和视频
 - GPU 加速的帧率重采样（如 25fps → 16fps）
 - 支持多种插值算法
+- OpenPose 骨架图像处理（移除头部/面部区域）
 
 ### 功能特点
 
@@ -31,6 +32,16 @@ ComfyUI 自定义节点集合，提供以下功能：
   - **framestep**：简单帧选择，速度最快
 - **智能回退**：GPU 失败时自动回退到 CPU 处理
 - **多 GPU 支持**：可选择使用特定的 GPU 设备
+
+#### OpenPose 骨架处理节点
+- **移除头部区域**：从 OpenPose 骨架图像中移除头部/面部区域
+- **支持完整模型**：完全支持 OpenPose Full Model（BODY_25 + FACE_70 + HAND_21×2）
+- **智能检测**：自动检测颈部位置和 FACE_70 密集点云区域
+- **多种模式**：
+  - **auto_detect_neck**：自动检测颈部位置（推荐）
+  - **manual_percentage**：手动指定移除百分比
+  - **manual_pixels**：手动指定移除像素数
+- **精确保留**：保留颈部以下的身体骨架和手部关键点
 
 ### 安装方法
 
@@ -62,6 +73,7 @@ pip install -r requirements.txt
 - PyTorch (ComfyUI 已包含)
 - Pillow >= 9.0.0
 - NumPy (ComfyUI 已包含)
+- OpenCV (cv2) >= 4.0.0：用于 OpenPose 骨架处理
 - **ffmpeg**（必须安装）：用于视频和帧率处理
 
 #### 安装 ffmpeg
@@ -194,6 +206,60 @@ GPU 加速版本的帧率重采样节点，支持 NVIDIA CUDA。
 - 需要快速处理的场景
 - 多 GPU 工作站可指定特定 GPU
 
+#### 6. ML Remove Pose Head
+
+从 OpenPose 骨架图像中移除头部/面部区域的节点，保留身体和手部骨架。
+
+**输入参数：**
+- `images`: OpenPose 骨架图像序列（IMAGE 类型）
+- `detection_mode`: 检测模式
+  - `auto_detect_neck`: 自动检测颈部位置（推荐）
+  - `manual_percentage`: 手动百分比模式
+  - `manual_pixels`: 手动像素模式
+- `neck_offset`: 颈部偏移量（像素，-100 到 200）
+  - 正值：移除更多（向下偏移切割线）
+  - 负值：保留更多（向上偏移切割线）
+  - 默认：20 像素
+- `manual_percentage`: 手动百分比（0-50%，manual_percentage 模式使用）
+- `manual_pixels`: 手动像素数（0-1000，manual_pixels 模式使用）
+- `detection_threshold`: 骨架检测阈值（0.01-1.0，默认 0.1）
+
+**输出：**
+- `images_no_head`: 移除头部后的骨架图像（IMAGE 类型）
+
+**支持的 OpenPose 格式：**
+- **BODY_25**: 25 个身体关键点
+  - 移除：点 0（鼻子）、15-18（眼睛、耳朵）
+  - 保留：点 1（颈部）及以下（2-14, 19-24）
+- **OpenPose Full Model**: BODY_25 + FACE_70 + HAND_21×2
+  - 移除：FACE_70 的 70 个面部关键点（密集点云）
+  - 移除：BODY_25 的面部点
+  - 保留：颈部、身体和双手的所有关键点
+
+**使用场景：**
+- 去除人脸信息，保护隐私
+- 只保留身体姿态和手势动作
+- 用于动作捕捉后处理
+- ControlNet 姿态控制（无面部）
+
+**检测模式说明：**
+
+1. **auto_detect_neck（推荐）**：
+   - 智能识别 FACE_70 密集点云区域
+   - 自动定位颈部关键点位置
+   - 使用 `neck_offset` 微调切割位置
+   - 适用于标准 OpenPose 输出
+
+2. **manual_percentage**：
+   - 按图像高度百分比移除顶部区域
+   - 例如：18% 表示移除顶部 18% 的区域
+   - 适用于特殊角度或非标准姿态
+
+3. **manual_pixels**：
+   - 指定从顶部移除的精确像素数
+   - 提供最精确的控制
+   - 适用于已知固定尺寸的图像
+
 ### 技术实现
 
 #### 元数据清除原理
@@ -272,7 +338,18 @@ A: 从 ComfyUI 的运行目录开始（通常是 ComfyUI 的根目录）。
 
 **Q: ffmpeg 必须安装吗？**
 
-A: 是的。视频保存和帧率重采样节点都需要 ffmpeg。图片保存节点不需要。
+A: 是的。视频保存和帧率重采样节点都需要 ffmpeg。图片保存节点和 OpenPose 处理节点不需要。
+
+**Q: RemovePoseHead 节点适用于哪些图像？**
+
+A: 仅适用于 OpenPose 生成的骨架图像（黑色背景上的白色/彩色骨架线条和关键点）。不适用于普通照片或视频。
+
+**Q: 自动检测模式不准确怎么办？**
+
+A: 可以尝试：
+1. 调整 `neck_offset` 参数（增大或减小）
+2. 调整 `detection_threshold` 参数（降低使检测更敏感）
+3. 使用 `manual_percentage` 或 `manual_pixels` 模式手动指定
 
 ### 开发
 
@@ -309,6 +386,14 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ### 更新日志
 
+#### v0.3.0 (2025-12-03)
+- 新增：ML Remove Pose Head 节点
+- 支持从 OpenPose 骨架图像中移除头部/面部区域
+- 支持 OpenPose Full Model（BODY_25 + FACE_70 + HAND_21×2）
+- 智能检测 FACE_70 密集点云和颈部位置
+- 提供自动检测和手动控制多种模式
+- 添加 OpenCV 依赖
+
 #### v0.2.0 (2025-10-13)
 - 新增：ML Frame Rate Resampler 节点（CPU 版本）
 - 新增：ML Frame Rate Resampler (GPU) 节点（CUDA 加速）
@@ -334,6 +419,7 @@ ComfyUI custom nodes collection for:
 - Saving images/videos without workflow metadata
 - GPU-accelerated frame rate resampling (e.g., 25fps → 16fps)
 - Multiple interpolation algorithms
+- OpenPose skeleton processing (remove head/face region)
 
 ### Features
 
@@ -353,6 +439,13 @@ ComfyUI custom nodes collection for:
   - **framestep**: Simple frame selection, fastest
 - **Smart Fallback**: Automatically falls back to CPU if GPU fails
 - **Multi-GPU Support**: Choose specific GPU devices
+
+#### OpenPose Skeleton Processing Node
+- **Remove Head/Face Region**: Remove head and face region from OpenPose skeleton images
+- **Full Model Support**: Supports OpenPose Full Model (BODY_25 + FACE_70 + HAND_21×2)
+- **Smart Detection**: Auto-detects neck position and FACE_70 dense point cluster
+- **Multiple Modes**: Auto-detection, manual percentage, and manual pixel modes
+- **Precise Preservation**: Preserves body skeleton and hand keypoints below neck
 
 ### Installation
 
@@ -384,6 +477,7 @@ Use "Install via Git URL" in ComfyUI Manager with the repository URL.
 - PyTorch (included with ComfyUI)
 - Pillow >= 9.0.0
 - NumPy (included with ComfyUI)
+- OpenCV (cv2) >= 4.0.0: For OpenPose skeleton processing
 - **ffmpeg** (required): For video and frame rate processing
 
 #### Installing ffmpeg
@@ -416,6 +510,7 @@ ffmpeg -version
 3. **ML Save Video (No Metadata)** - Save image sequences as videos without metadata
 4. **ML Frame Rate Resampler** - CPU-based frame rate conversion
 5. **ML Frame Rate Resampler (GPU)** - GPU-accelerated frame rate conversion
+6. **ML Remove Pose Head** - Remove head/face region from OpenPose skeleton images
 
 See Chinese documentation above for detailed usage instructions.
 
@@ -448,3 +543,4 @@ Issues and Pull Requests are welcome!
 - `SaveVideoNoMetadata` → **ML Save Video (No Metadata)**
 - `MLFrameRateResampler` → **ML Frame Rate Resampler**
 - `MLFrameRateResampler_GPU` → **ML Frame Rate Resampler (GPU)**
+- `RemovePoseHead` → **ML Remove Pose Head**
